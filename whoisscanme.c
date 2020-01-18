@@ -26,6 +26,8 @@
 
 #define MY_SEQ 1
 
+#define STOREMYSQL 1
+
 int debug = 0;
 char response_str[MAXLEN] = "https://github.com/bg6cq/whoisscanme";
 
@@ -110,6 +112,12 @@ void err_sys(const char *fmt, ...)
 	va_end(ap);
 	exit(1);
 }
+
+#ifdef STOREMYSQL
+
+#include "storemysql.c"
+
+#endif
 
 /**
  * Open a rawsocket for the network interface
@@ -435,6 +443,13 @@ void process_packet(void)
 				if (memcmp((char *)tcph + tcph->doff * 4, "whoisscanme", 11) == 0)	// check loop
 					continue;
 
+#ifdef STOREMYSQL
+				char fromip[MAXLEN], toip[MAXLEN];
+				snprintf(fromip, MAXLEN, "%d.%d.%d.%d", IPQUAD(ip->saddr));
+				snprintf(toip, MAXLEN, "%d.%d.%d.%d", IPQUAD(ip->daddr));
+
+				store_mysql(fromip, ntohs(tcph->source), toip, ntohs(tcph->dest));
+#endif
 				swap_bytes((unsigned char *)buf, (unsigned char *)(buf + 6), 6);
 				swap_bytes((unsigned char *)&ip->saddr, (unsigned char *)&ip->daddr, 4);
 				swap_bytes((unsigned char *)&tcph->source, (unsigned char *)&tcph->dest, 2);
@@ -520,6 +535,10 @@ int main(int argc, char *argv[])
 	logfile = stdout;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
+
+#ifdef STOREMYSQL
+	mysql = connectdb();
+#endif
 
 	if (open_rawsocket(dev_name) < 0) {
 		perror("Create Error");
