@@ -11,8 +11,10 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/ethernet.h>
-#include <net/if.h>
+//#include <net/if.h>
+//#include <net/if_arp.h>
 #include <linux/if_packet.h>
+#include <linux/if_arp.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
 #include <netinet/ip.h>
@@ -34,6 +36,7 @@ char dev_mac[6];
 int Ports[65536];
 FILE *logfile;
 int do_response = 1;
+uint32_t my_ip;
 
 #ifdef __LITTLE_ENDIAN
 #define IPQUAD(addr)			\
@@ -281,6 +284,60 @@ void swap_bytes(unsigned char *a, unsigned char *b, int len)
 	}
 }
 
+typedef struct arp_hdr {
+	unsigned short ar_hrd;	/* format of hardware address        */
+	unsigned short ar_pro;	/* format of protocol address        */
+	unsigned char ar_hln;	/* length of hardware address        */
+	unsigned char ar_pln;	/* length of protocol address        */
+	unsigned short arp_op;	/* ARP opcode (command)                */
+
+	unsigned char arp_sha[ETH_ALEN];	/* sender hardware address        */
+	unsigned char arp_sip[4];	/* sender IP address                */
+	unsigned char arp_tha[ETH_ALEN];	/* target hardware address        */
+	unsigned char arp_tip[4];	/* target IP address                */
+} arpheader;
+
+static inline int process_arp(unsigned char *buf, int len)
+{
+	struct arp_hdr *ah = (struct arp_hdr *)(buf + 14);
+#ifdef DEBUGARP
+	dump_arp_packet(eh);
+#endif
+	if (len < (int)(14 + sizeof(struct arp_hdr))) {
+#ifdef DEBUGICMP
+		printf("len = %d is too small for arp packet??\n", len);
+#endif
+		return 0;
+	}
+	if (ntohs(ah->arp_op) != 1) {	// ARP_OP_REQUEST ARP request
+		return 0;
+	}
+	if (memcmp(&my_ip, ah->arp_tip, 4) == 0) {
+#ifdef DEBUGARP
+		printf("ARP asking me....\n");
+#endif
+		memcpy((unsigned char *)(buf), (unsigned char *)(buf + 6), 6);
+		memcpy((unsigned char *)(buf + 6), (unsigned char *)dev_mac, 6);
+		ah->arp_op = htons(2);	// ARP_OP_REPLY
+		memcpy(ah->arp_tha, ah->arp_sha, 6);
+		memcpy((unsigned char *)&ah->arp_sha, (unsigned char *)dev_mac, 6);
+		memcpy(ah->arp_tip, ah->arp_sip, 4);
+		memcpy(ah->arp_sip, &my_ip, 4);
+#ifdef DEBUGARP
+		printf("I will reply following \n");
+		dump_arp_packet(eh);
+#endif
+		struct sockaddr_ll sll;
+		memset(&sll, 0, sizeof(sll));
+		sll.sll_family = AF_PACKET;
+		sll.sll_protocol = htons(ETH_P_ALL);
+		sll.sll_ifindex = raw_ifindex;
+		int n = sendto(raw_sockfd, buf, len, 0, (struct sockaddr *)&sll, sizeof(sll));
+		Debug("want send %d bytes, send out %d", len, n);
+	}
+	return 0;
+}
+
 void process_packet(void)
 {
 	u_int8_t buf[MAX_PACKET_SIZE];
@@ -292,6 +349,11 @@ void process_packet(void)
 			continue;
 		unsigned char *packet = buf + 12;
 		int pkt_len = len - 12;
+		if ((packet[0] == 0x08) && (packet[1] == 0x06)) {	// ARP
+			Debug("arp");
+			process_arp(buf, len);
+			continue;
+		}
 		if (memcmp(buf, dev_mac, 6)) {
 			if (debug)
 				Debug("skip not to my mac_addr packets");
@@ -370,7 +432,7 @@ void process_packet(void)
 					continue;
 				if (tcph->syn)
 					continue;
-				if(memcmp((char *)tcph + tcph->doff * 4, "whoisscanme", 11)==0)  // check loop
+				if (memcmp((char *)tcph + tcph->doff * 4, "whoisscanme", 11) == 0)	// check loop
 					continue;
 
 				swap_bytes((unsigned char *)buf, (unsigned char *)(buf + 6), 6);
@@ -403,13 +465,14 @@ void process_packet(void)
 void usage(void)
 {
 	printf("Usage:\n");
-	printf("./whoisscanme [ -d ] [ -n ] [ -r response_str] -i ifname [ -p port1,port2 ]\n");
+	printf("./whoisscanme [ -d ] [ -n ] [ -r response_str] -i ifname -a my_ipv4 [ -p port1,port2 ]\n");
 	printf(" options:\n");
 	printf("    -d               enable debug\n");
 	printf("    -n               do not send response\n");
 	printf("    -r response_str  response str\n");
-	printf("    -i ifname        interface to monitor\n");
 	printf("    -p port1,port2   tcp ports to monitor, default is all\n");
+	printf("    -i ifname        interface to monitor\n");
+	printf("    -a my_ipv4       my_ipv4, used do arp\n");
 	exit(0);
 }
 
@@ -417,7 +480,7 @@ int main(int argc, char *argv[])
 {
 	int c;
 	int user_set_port = 0;
-	while ((c = getopt(argc, argv, "dnr:i:p:")) != EOF)
+	while ((c = getopt(argc, argv, "dnr:i:a:p:")) != EOF)
 		switch (c) {
 		case 'd':
 			debug = 1;
@@ -430,6 +493,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'i':
 			strncpy(dev_name, optarg, MAXLEN);
+			break;
+		case 'a':
+			my_ip = inet_addr(optarg);
 			break;
 		case 'p':
 			user_set_port = 1;
@@ -448,6 +514,7 @@ int main(int argc, char *argv[])
 		printf("   do_response = %d\n", do_response);
 		printf("  response str = %s\n", response_str);
 		printf("         netif = %s\n", dev_name);
+		printf("          myip = %s\n", inet_ntoa(*((struct in_addr *)&my_ip)));
 	}
 
 	logfile = stdout;
