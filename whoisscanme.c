@@ -2,27 +2,66 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <net/ethernet.h>
-#include <linux/if_packet.h>
-#include <net/if.h>
-#include <arpa/inet.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <string.h>
 #include <syslog.h>
+#include <time.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/ethernet.h>
+#include <net/if.h>
+#include <linux/if_packet.h>
+#include <arpa/inet.h>
+#include <sys/time.h>
+#include <netinet/ip.h>
+#include <netinet/ip6.h>
+#include <netinet/tcp.h>
 
 #define MAX_PACKET_SIZE 2048
 #define MAXLEN 2048
 
+#define MY_SEQ 1
+
 int debug = 0;
+char response_str[MAXLEN] = "https://github.com/bg6cq/whoisscanme";
 
 int32_t raw_ifindex;
 int32_t raw_sockfd;
 char dev_name[MAXLEN];
+char dev_mac[6];
 int Ports[65536];
+FILE *logfile;
+int do_response = 1;
+
+#ifdef __LITTLE_ENDIAN
+#define IPQUAD(addr)			\
+    ((unsigned char *)&addr)[0],	\
+    ((unsigned char *)&addr)[1],	\
+    ((unsigned char *)&addr)[2],	\
+    ((unsigned char *)&addr)[3]
+#else
+#define IPQUAD(addr)			\
+  ((unsigned char *)&addr)[3],		\
+    ((unsigned char *)&addr)[2],	\
+    ((unsigned char *)&addr)[1],	\
+    ((unsigned char *)&addr)[0]
+#endif
+
+char *stamp(void)
+{
+	static char st_buf[200];
+	struct timeval tv;
+	struct timezone tz;
+	struct tm *tm;
+
+	gettimeofday(&tv, &tz);
+	tm = localtime(&tv.tv_sec);
+
+	snprintf(st_buf, 200, "%02d%02d %02d:%02d:%02d.%06ld", tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec, tv.tv_usec);
+	return st_buf;
+}
 
 void err_doit(int errnoflag, int level, const char *fmt, va_list ap)
 {
@@ -89,6 +128,24 @@ int32_t open_rawsocket(char *ifname)
 		err_sys("SIOCGIFINDEX %s - ", ifname);
 	raw_ifindex = ifr.ifr_ifindex;
 
+	// get interface mac
+	memset(&ifr, 0, sizeof(ifr));
+	strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
+	if (ioctl(raw_sockfd, SIOCGIFHWADDR, &ifr) == -1)
+		err_sys("SIOCGIFHWADDR %s - ", ifname);
+	memcpy(dev_mac, ifr.ifr_hwaddr.sa_data, 6);
+
+	if (debug) {
+		int i;
+		fprintf(stderr, "MAC_ADDR: ");
+		for (i = 0; i < 6; i++) {
+			printf("%.2X", (unsigned char)ifr.ifr_hwaddr.sa_data[i]);
+			if (i < 5)
+				printf(":");
+		}
+		printf("\n");
+	}
+
 	memset(&sll, 0xff, sizeof(sll));
 	sll.sll_family = AF_PACKET;
 	sll.sll_protocol = htons(ETH_P_ALL);
@@ -138,14 +195,221 @@ void get_ports(char *s)
 	}
 }
 
+// function from http://www.bloof.de/tcp_checksumming, thanks to crunsh
+u_int16_t tcp_sum_calc(u_int16_t len_tcp, u_int16_t src_addr[], u_int16_t dest_addr[], u_int16_t buff[])
+{
+	u_int16_t prot_tcp = 6;
+	u_int32_t sum = 0;
+	int nleft = len_tcp;
+	u_int16_t *w = buff;
+
+	/* calculate the checksum for the tcp header and payload */
+	while (nleft > 1) {
+		sum += *w++;
+		nleft -= 2;
+	}
+
+	/* if nleft is 1 there ist still on byte left. We add a padding byte (0xFF) to build a 16bit word */
+	if (nleft > 0)
+		sum += *w & ntohs(0xFF00);	/* Thanks to Dalton */
+
+	/* add the pseudo header */
+	sum += src_addr[0];
+	sum += src_addr[1];
+	sum += dest_addr[0];
+	sum += dest_addr[1];
+	sum += htons(len_tcp);
+	sum += htons(prot_tcp);
+
+	// keep only the last 16 bits of the 32 bit calculated sum and add the carries
+	sum = (sum >> 16) + (sum & 0xFFFF);
+	sum += (sum >> 16);
+
+	// Take the one's complement of sum
+	sum = ~sum;
+
+	return ((u_int16_t) sum);
+}
+
+static void set_ip_tcp_checksum(struct iphdr *ip)
+{
+	struct tcphdr *tcph = (struct tcphdr *)((u_int8_t *) ip + (ip->ihl << 2));
+	tcph->check = 0;	/* Checksum field has to be set to 0 before checksumming */
+	tcph->check = (u_int16_t) tcp_sum_calc((u_int16_t) (ntohs(ip->tot_len) - ip->ihl * 4),
+					       (u_int16_t *) & ip->saddr, (u_int16_t *) & ip->daddr, (u_int16_t *) tcph);
+
+	ip->check = 0;
+	unsigned int cksum;
+	int idx;
+	int odd;
+	int len = ip->ihl << 2;
+	cksum = 0;
+
+	odd = len & 1;
+	len -= odd;
+	uint8_t *ptr = (uint8_t *) ip;
+
+	for (idx = 0; idx < len; idx += 2) {
+		cksum += ((unsigned long)ptr[idx] << 8) + ((unsigned long)ptr[idx + 1]);
+	}
+
+	if (odd) {		/* buffer is odd length */
+		cksum += ((unsigned long)ptr[idx] << 8);
+	}
+
+	/*
+	 * Fold in the carries
+	 */
+
+	while (cksum >> 16) {
+		cksum = (cksum & 0xFFFF) + (cksum >> 16);
+	}
+	ip->check = htons(~cksum);
+
+}
+
+void swap_bytes(unsigned char *a, unsigned char *b, int len)
+{
+	unsigned char t;
+	int i;
+	if (len <= 0)
+		return;
+	for (i = 0; i < len; i++) {
+		t = *(a + i);
+		*(a + i) = *(b + i);
+		*(b + i) = t;
+	}
+}
+
+void process_packet(void)
+{
+	u_int8_t buf[MAX_PACKET_SIZE];
+	int len;
+	while (1) {
+		len = recv(raw_sockfd, buf, MAX_PACKET_SIZE, 0);
+		Debug("read from raw %d bytes", len);
+		if (len < 56)
+			continue;
+		unsigned char *packet = buf + 12;
+		int pkt_len = len - 12;
+		if (memcmp(buf, dev_mac, 6)) {
+			if (debug)
+				Debug("skip not to my mac_addr packets");
+			continue;
+		}
+		if (debug)
+			Debug("proto: 0x%02X%02X", packet[0], packet[1]);
+		if ((packet[0] == 0x81) && (packet[1] == 0x00)) {	// skip 802.1Q tag 0x8100
+			if (debug)
+				Debug("skip 802.1Q pkt");
+			continue;
+		}
+		if ((packet[0] == 0x08) && (packet[1] == 0x00)) {	// IPv4 packet 0x0800
+			packet += 2;
+			pkt_len -= 2;
+			struct iphdr *ip = (struct iphdr *)packet;
+			if (debug)
+				Debug("ipv4 pkt, version=%d, frag=%d, proto=%d, len=%d", ip->version, ntohs(ip->frag_off) & 0x1fff, ip->protocol,
+				      ntohs(ip->tot_len));
+			if (ip->version != 4) {
+				Debug("ip->version is not 4");
+				continue;	// check ipv4
+			}
+			if (ntohs(ip->frag_off) & 0x1fff)
+				continue;	// not the first fragment
+			if (ip->protocol != IPPROTO_TCP)
+				continue;	// not tcp packet
+			if (ntohs(ip->tot_len) > pkt_len)
+				continue;	// tot_len should < len 
+
+			struct tcphdr *tcph = (struct tcphdr *)(packet + ip->ihl * 4);
+			Debug("tcp pkt, syn=%d ack=%d", tcph->syn, tcph->ack);
+			if (tcph->syn && (!tcph->ack)) {	// SYN packet, send SYN+ACK
+				int port = ntohs(tcph->dest);
+				Debug("tcp syn and not ack, to port %d", port);
+				if (Ports[port] == 0) {
+					Debug("skip to port %d", port);
+					continue;
+				}
+				swap_bytes((unsigned char *)buf, (unsigned char *)(buf + 6), 6);
+				swap_bytes((unsigned char *)&ip->saddr, (unsigned char *)&ip->daddr, 4);
+				swap_bytes((unsigned char *)&tcph->source, (unsigned char *)&tcph->dest, 2);
+				tcph->ack = 1;
+				tcph->ack_seq = htonl(ntohl(tcph->seq) + 1);
+				tcph->seq = htonl(MY_SEQ);
+				tcph->doff = 20 / 4;
+				pkt_len = ip->ihl * 4 + tcph->doff * 4;
+				ip->tot_len = htons(pkt_len);
+				ip->check = 0;
+				set_ip_tcp_checksum(ip);
+
+				struct sockaddr_ll sll;
+				memset(&sll, 0, sizeof(sll));
+				sll.sll_family = AF_PACKET;
+				sll.sll_protocol = htons(ETH_P_ALL);
+				sll.sll_ifindex = raw_ifindex;
+				int n = sendto(raw_sockfd, buf, pkt_len + 14, 0, (struct sockaddr *)&sll, sizeof(sll));
+				Debug("want send %d bytes, send out %d", pkt_len + 14, n);
+				continue;
+			}
+			if (tcph->ack) {	// ACK packet, log
+				int port = ntohs(tcph->dest);
+				Debug("tcp ack, to port %d", port);
+				if (Ports[port] == 0) {
+					Debug("skip to port %d", port);
+					continue;
+				}
+				if (ntohl(tcph->ack_seq) != MY_SEQ + 1) {
+					Debug("ack_seq=%d, not my", ntohl(tcph->ack_seq));
+					continue;
+				}
+
+				fprintf(logfile, "%s %d.%d.%d.%d %d %d.%d.%d.%d %d\n",
+					stamp(), IPQUAD(ip->saddr), ntohs(tcph->source), IPQUAD(ip->daddr), ntohs(tcph->dest));
+				if (do_response == 0)
+					continue;
+				if (tcph->syn)
+					continue;
+				if(memcmp((char *)tcph + tcph->doff * 4, "whoisscanme", 11)==0)  // check loop
+					continue;
+
+				swap_bytes((unsigned char *)buf, (unsigned char *)(buf + 6), 6);
+				swap_bytes((unsigned char *)&ip->saddr, (unsigned char *)&ip->daddr, 4);
+				swap_bytes((unsigned char *)&tcph->source, (unsigned char *)&tcph->dest, 2);
+				tcph->ack = 1;
+				tcph->ack_seq = tcph->seq;
+				tcph->seq = htonl(MY_SEQ + 1);
+				tcph->doff = 20 / 4;
+
+				pkt_len = ip->ihl * 4 + tcph->doff * 4 + sprintf((char *)tcph + tcph->doff * 4, "%s:%s\n", "whoisscanme", response_str);
+				ip->tot_len = htons(pkt_len);
+				ip->check = 0;
+				set_ip_tcp_checksum(ip);
+
+				struct sockaddr_ll sll;
+				memset(&sll, 0, sizeof(sll));
+				sll.sll_family = AF_PACKET;
+				sll.sll_protocol = htons(ETH_P_ALL);
+				sll.sll_ifindex = raw_ifindex;
+				int n = sendto(raw_sockfd, buf, pkt_len + 14, 0, (struct sockaddr *)&sll, sizeof(sll));
+				Debug("want send %d bytes, send out %d", pkt_len + 14, n);
+				continue;
+			}
+		}
+
+	}
+}
+
 void usage(void)
 {
 	printf("Usage:\n");
-	printf("./whoisscanme [ -d ] -i ifname [ -p port1,port2 ]\n");
+	printf("./whoisscanme [ -d ] [ -n ] [ -r response_str] -i ifname [ -p port1,port2 ]\n");
 	printf(" options:\n");
 	printf("    -d               enable debug\n");
+	printf("    -n               do not send response\n");
+	printf("    -r response_str  response str\n");
 	printf("    -i ifname        interface to monitor\n");
-	printf("    -p port1,port2   tcp ports to monitor\n");
+	printf("    -p port1,port2   tcp ports to monitor, default is all\n");
 	exit(0);
 }
 
@@ -153,10 +417,16 @@ int main(int argc, char *argv[])
 {
 	int c;
 	int user_set_port = 0;
-	while ((c = getopt(argc, argv, "di:p:")) != EOF)
+	while ((c = getopt(argc, argv, "dnr:i:p:")) != EOF)
 		switch (c) {
 		case 'd':
 			debug = 1;
+			break;
+		case 'n':
+			do_response = 0;
+			break;
+		case 'r':
+			strncpy(response_str, optarg, MAXLEN);
 			break;
 		case 'i':
 			strncpy(dev_name, optarg, MAXLEN);
@@ -175,12 +445,15 @@ int main(int argc, char *argv[])
 	}
 	if (debug) {
 		printf("         debug = 1\n");
+		printf("   do_response = %d\n", do_response);
+		printf("  response str = %s\n", response_str);
 		printf("         netif = %s\n", dev_name);
 	}
 
+	logfile = stdout;
+
 	setvbuf(stdout, NULL, _IONBF, 0);
 
-	printf("open rawsocket\n");
 	if (open_rawsocket(dev_name) < 0) {
 		perror("Create Error");
 		exit(1);
