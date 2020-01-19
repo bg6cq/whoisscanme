@@ -346,6 +346,52 @@ static inline int process_arp(unsigned char *buf, int len)
 	return 0;
 }
 
+#define MAXHIS 50
+
+struct {
+	time_t tm;
+	char fromip[INET_ADDRSTRLEN];
+	int fromport;
+	char toip[INET_ADDRSTRLEN];
+	int toport;
+} LogHist[MAXHIS];
+
+int cur_his = 0;
+
+void do_log(char *fromip, int fromport, char *toip, int toport)
+{
+	time_t tm;
+	tm = time(NULL);
+	int i;
+	int found = 0;
+	for (i = 0; i < MAXHIS; i++) {
+		if ((tm - LogHist[i].tm < 5)
+		    && (fromport == LogHist[i].fromport)
+		    && (toport == LogHist[i].toport)
+		    && (strcmp(fromip, LogHist[i].fromip) == 0)
+		    && (strcmp(toip, LogHist[i].toip) == 0)) {
+			found = 1;
+			Debug("Found in log his: %d\n", i);
+			break;
+		}
+	}
+	if (found)
+		return;
+	LogHist[cur_his].tm = tm;
+	LogHist[cur_his].fromport = fromport;
+	LogHist[cur_his].toport = toport;
+	strncpy(LogHist[cur_his].fromip, fromip, INET_ADDRSTRLEN);
+	strncpy(LogHist[cur_his].toip, toip, INET_ADDRSTRLEN);
+	cur_his = (cur_his + 1) % MAXHIS;
+
+	Debug("add to his, now cur_his: %d\n", cur_his);
+
+	fprintf(logfile, "%s %s %d %s %d\n", stamp(), fromip, fromport, toip, toport);
+#ifdef STOREMYSQL
+	store_mysql(fromip, fromport, toip, toport);
+#endif
+}
+
 void process_packet(void)
 {
 	u_int8_t buf[MAX_PACKET_SIZE];
@@ -393,10 +439,10 @@ void process_packet(void)
 				continue;	// tot_len should < len 
 
 			struct tcphdr *tcph = (struct tcphdr *)(packet + ip->ihl * 4);
-			Debug("tcp pkt, syn=%d ack=%d", tcph->syn, tcph->ack);
+//                      Debug("tcp pkt, syn=%d ack=%d", tcph->syn, tcph->ack);
 			if (tcph->syn && (!tcph->ack)) {	// SYN packet, send SYN+ACK
 				int port = ntohs(tcph->dest);
-				Debug("tcp syn and not ack, to port %d", port);
+//                              Debug("tcp syn and not ack, to port %d", port);
 				if (Ports[port] == 0) {
 					Debug("skip to port %d", port);
 					continue;
@@ -424,18 +470,21 @@ void process_packet(void)
 			}
 			if (tcph->ack) {	// ACK packet, log
 				int port = ntohs(tcph->dest);
-				Debug("tcp ack, to port %d", port);
+//                              Debug("tcp ack, to port %d", port);
 				if (Ports[port] == 0) {
-					Debug("skip to port %d", port);
+//                                      Debug("skip to port %d", port);
 					continue;
 				}
 				if (ntohl(tcph->ack_seq) != MY_SEQ + 1) {
-					Debug("ack_seq=%d, not my", ntohl(tcph->ack_seq));
+//                                      Debug("ack_seq=%d, not my", ntohl(tcph->ack_seq));
 					continue;
 				}
 
-				fprintf(logfile, "%s %d.%d.%d.%d %d %d.%d.%d.%d %d\n",
-					stamp(), IPQUAD(ip->saddr), ntohs(tcph->source), IPQUAD(ip->daddr), ntohs(tcph->dest));
+				char fromip[INET_ADDRSTRLEN], toip[INET_ADDRSTRLEN];
+				snprintf(fromip, INET_ADDRSTRLEN, "%d.%d.%d.%d", IPQUAD(ip->saddr));
+				snprintf(toip, INET_ADDRSTRLEN, "%d.%d.%d.%d", IPQUAD(ip->daddr));
+				do_log(fromip, ntohs(tcph->source), toip, ntohs(tcph->dest));
+
 				if (do_response == 0)
 					continue;
 				if (tcph->syn)
@@ -443,13 +492,6 @@ void process_packet(void)
 				if (memcmp((char *)tcph + tcph->doff * 4, "whoisscanme", 11) == 0)	// check loop
 					continue;
 
-#ifdef STOREMYSQL
-				char fromip[MAXLEN], toip[MAXLEN];
-				snprintf(fromip, MAXLEN, "%d.%d.%d.%d", IPQUAD(ip->saddr));
-				snprintf(toip, MAXLEN, "%d.%d.%d.%d", IPQUAD(ip->daddr));
-
-				store_mysql(fromip, ntohs(tcph->source), toip, ntohs(tcph->dest));
-#endif
 				swap_bytes((unsigned char *)buf, (unsigned char *)(buf + 6), 6);
 				swap_bytes((unsigned char *)&ip->saddr, (unsigned char *)&ip->daddr, 4);
 				swap_bytes((unsigned char *)&tcph->source, (unsigned char *)&tcph->dest, 2);
