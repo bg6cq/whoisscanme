@@ -1,0 +1,22 @@
+<html>
+<head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+	<title>whoisscanme@UTSC</title>
+</head>
+
+<body bgcolor=#dddddd>
+
+<a href=index.php>扫描信息</a> 
+<a href=https://github.com/bg6cq/whoisscanme>列表介绍</a> 
+<?php 
+echo "您的IP地址:";
+echo  $_SERVER["REMOTE_ADDR"];
+
+function isMobile() {
+    return preg_match("/(android|avantgo|blackberry|bolt|boost|cricket|docomo|fone|hiptop|mini|mobi|palm|phone|pie|tablet|up\.browser|up\.link|webos|wos)/i", $_SERVER["HTTP_USER_
+AGENT"]);
+}
+
+?>
+<hr>
+
