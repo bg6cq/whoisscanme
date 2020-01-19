@@ -32,8 +32,11 @@ CREATE TABLE `scanlog` (
   PRIMARY KEY (`id`),
   KEY `tm_fromip` (`tm`,`fromip`),
   KEY `tm_toip` (`tm`,`toip`),
-  KEY `tm_toport` (`tm`,`toport`)
-) ENGINE=InnoDB AUTO_INCREMENT=1431 DEFAULT CHARSET=latin1;
+  KEY `tm_toport` (`tm`,`toport`),
+  KEY `kfromip` (`fromip`),
+  KEY `ktoip` (`toip`),
+  KEY `ktoport` (`toport`)
+) ENGINE=InnoDB AUTO_INCREMENT=320882 DEFAULT CHARSET=latin1;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -45,4 +48,4 @@ CREATE TABLE `scanlog` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2020-01-18 21:53:01
+-- Dump completed on 2020-01-19 10:22:04
