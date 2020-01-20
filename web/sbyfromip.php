@@ -17,7 +17,7 @@ echo "IP信息</a>";
 <table border=1 cellspacing=0>
 <tr><th>日期</th><th>端口</th><th>次数</th></tr>
 <?php
-$q = "select date(tm), toport, count(*) c from scanlog where fromip = ? and tm > date_sub(now(), interval 7 day) group by date(tm), toport order by c desc limit 50";
+$q = "select date(tm), toport, count(*) c from scanlog where fromip = ? and tm > date_sub(now(), interval 7 day) group by date(tm), toport order by c desc";
 $stmt=$mysqli->prepare($q);
 $stmt->bind_param("s",$fromip);
 $stmt->execute();

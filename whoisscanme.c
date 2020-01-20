@@ -39,6 +39,8 @@ int Ports[65536];
 FILE *logfile;
 int do_response = 1;
 uint32_t my_ip;
+char event_ip[MAXLEN];
+int event_port;
 
 #ifdef __LITTLE_ENDIAN
 #define IPQUAD(addr)			\
@@ -118,6 +120,31 @@ void err_sys(const char *fmt, ...)
 #include "storemysql.c"
 
 #endif
+
+
+void sendudp(char *buf, int len, char *host, int port)
+{
+        struct sockaddr_in si_other;
+        int s, slen=sizeof(si_other);
+        int l;
+        Debug("send to udp to %s:%d(%s)",host, port, buf);
+        if ((s=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP))==-1) {
+                fprintf(stderr,"socket error");
+                return;
+        }
+        memset((char *) &si_other, 0, sizeof(si_other));
+        si_other.sin_family = AF_INET;
+        si_other.sin_port = htons(port);
+        if (inet_aton(host, &si_other.sin_addr)==0) {
+                fprintf(stderr, "inet_aton() failed\n");
+                close(s);
+                return;
+        }
+        l = sendto(s, buf, len, 0, (const struct sockaddr *)&si_other, slen);
+	Debug("send %d bytes", l);
+        close(s);
+}
+
 
 /**
  * Open a rawsocket for the network interface
@@ -386,6 +413,12 @@ void do_log(char *fromip, int fromport, char *toip, int toport)
 
 	Debug("add to his, now cur_his: %d\n", cur_his);
 
+	if(event_ip[0]) {
+		char event_buf[MAXLEN];
+		snprintf(event_buf, MAXLEN, "PORTSCAN %s %d %s %d",  fromip, fromport, toip, toport);
+		sendudp(event_buf, strlen(event_buf), event_ip, event_port);
+	}
+	
 	fprintf(logfile, "%s %s %d %s %d\n", stamp(), fromip, fromport, toip, toport);
 #ifdef STOREMYSQL
 	store_mysql(fromip, fromport, toip, toport);
@@ -522,11 +555,13 @@ void process_packet(void)
 void usage(void)
 {
 	printf("Usage:\n");
-	printf("./whoisscanme [ -d ] [ -n ] [ -r response_str] -i ifname -a my_ipv4 [ -p port1,port2 ]\n");
+	printf("./whoisscanme [ -d ] [ -n ] [ -r response_str] [ -e event_ip ] [ -E event_port ] -i ifname -a my_ipv4 [ -p port1,port2 ]\n");
 	printf(" options:\n");
 	printf("    -d               enable debug\n");
 	printf("    -n               do not send response\n");
 	printf("    -r response_str  response str\n");
+	printf("    -e event_ip      send event to event_ip\n");
+	printf("    -E event_port    \n");
 	printf("    -p port1,port2   tcp ports to monitor, default is all\n");
 	printf("    -i ifname        interface to monitor\n");
 	printf("    -a my_ipv4       my_ipv4, used do arp\n");
@@ -537,7 +572,7 @@ int main(int argc, char *argv[])
 {
 	int c;
 	int user_set_port = 0;
-	while ((c = getopt(argc, argv, "dnr:i:a:p:")) != EOF)
+	while ((c = getopt(argc, argv, "dnr:e:E:i:a:p:")) != EOF)
 		switch (c) {
 		case 'd':
 			debug = 1;
@@ -547,6 +582,12 @@ int main(int argc, char *argv[])
 			break;
 		case 'r':
 			strncpy(response_str, optarg, MAXLEN);
+			break;
+		case 'e':
+			strncpy(event_ip, optarg, MAXLEN);
+			break;
+		case 'E':
+			event_port = atoi(optarg);
 			break;
 		case 'i':
 			strncpy(dev_name, optarg, MAXLEN);
@@ -572,6 +613,8 @@ int main(int argc, char *argv[])
 		printf("  response str = %s\n", response_str);
 		printf("         netif = %s\n", dev_name);
 		printf("          myip = %s\n", inet_ntoa(*((struct in_addr *)&my_ip)));
+		printf("      event_ip = %s\n", event_ip);
+		printf("    event_port = %d\n", event_port);
 	}
 
 	logfile = stdout;
