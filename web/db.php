@@ -15,12 +15,8 @@ if (isset($_COOKIE[session_name()]))
 	session_start();
 
 function getipdesc($ip) {
-	if(strchr($ip,":")) // ipv6
-		$u = "ipv6";
-	else {
-        	$url = "http://210.45.224.10:90/".$ip;
-		$u = file_get_contents($url);
-	}
+       	$url = "http://ip.ustc.edu.cn/ip/".$ip;
+	$u = file_get_contents($url);
 	return $u;
 }
 

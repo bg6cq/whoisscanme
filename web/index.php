@@ -5,7 +5,7 @@ include "db.php";
 include "top.html";
 
 ?>
-<table>
+<table width=1500px>
 <tr>
 <td align=center>
 扫描来源IP排序
